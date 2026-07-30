@@ -1,7 +1,7 @@
 {
   "name": "stock-portfolio",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.0.1",
   "type": "module",
   "main": "dist-electron/main.js",
   "scripts": {
@@ -48,7 +48,8 @@
       {
         "provider": "github",
         "owner": "ksk6946-creator",
-        "repo": "stock-portfolio"
+        "repo": "stock-portfolio",
+        "releaseType": "release"
       }
     ],
     "files": [

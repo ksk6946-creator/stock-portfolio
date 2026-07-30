@@ -215,12 +215,12 @@ function parseDividendKakao(msg: string, defaultAccount: string): ParsedKakaoIte
     if (!netAmount) netAmount = amount
   } else {
     // 국내 배당: "A088980 맥쿼리한국인프라투융자회사 보통주"
-    const stockMatch = msg.match(/([A-Z]?\d{6})\s+(.+?)\s+(?:보통주|우선주|배당금)/)
+    const stockMatch = msg.match(/(A?[0-9][0-9A-Z]{5})\s+(.+?)\s+(?:보통주|우선주|배당금)/)
     if (stockMatch) {
       stockCode = stockMatch[1].startsWith('A') ? stockMatch[1] : 'A' + stockMatch[1]
       stockName = stockMatch[2].trim()
     } else {
-      const codeOnly = msg.match(/([A-Z]\d{6})\s+(.+?)(?:\s|배당|보통)/)
+      const codeOnly = msg.match(/(A[0-9][0-9A-Z]{5})\s+(.+?)(?:\s|배당|보통)/)
       if (codeOnly) {
         stockCode = codeOnly[1]
         stockName = codeOnly[2].trim()
@@ -353,7 +353,8 @@ function parseMiraeKakao(msg: string, defaultAccount: string, contextDateTime?: 
     // 해외주식: 종목명(TICKER) 형태
     const foreignMatch = raw.match(/^(.+?)\(([A-Z]{1,5})\)$/)
     // 국내주식: 종목명(A123456) 형태
-    const domesticMatch = raw.match(/^(.+?)\(([A-Z]?\d{6})\)$/)
+    // 종목코드는 숫자로 시작하는 6자리 영숫자 (ETF/ETN은 영문 포함: 0193T0, 0080Y0 등)
+    const domesticMatch = raw.match(/^(.+?)\((A?[0-9][0-9A-Z]{5})\)$/)
     if (domesticMatch) {
       stockName = domesticMatch[1].trim()
       stockCode = domesticMatch[2].startsWith('A') ? domesticMatch[2] : 'A' + domesticMatch[2]
