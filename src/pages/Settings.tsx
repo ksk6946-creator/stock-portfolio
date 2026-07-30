@@ -9,10 +9,35 @@ export default function Settings() {
   const [restoreLogs, setRestoreLogs] = useState<string[]>([])
   const [dbPathDisplay, setDbPathDisplay] = useState('')
   const [dbStatus, setDbStatus] = useState('')
+  const [appVersion, setAppVersion] = useState('')
+  const [logPath, setLogPath] = useState('')
+  const [updateMsg, setUpdateMsg] = useState('')
+  const [checking, setChecking] = useState(false)
 
   useEffect(() => {
     loadSettings()
+    window.api.app?.getVersion().then(setAppVersion).catch(() => {})
+    window.api.app?.getLogPath().then(setLogPath).catch(() => {})
   }, [])
+
+  async function handleCheckUpdate() {
+    setChecking(true)
+    setUpdateMsg('업데이트 확인 중...')
+    try {
+      const r = await window.api.updater.check()
+      if (!r.success) {
+        setUpdateMsg(`확인 실패: ${r.error}`)
+      } else if (r.version && r.version !== appVersion) {
+        setUpdateMsg(`새 버전 v${r.version} 발견. 백그라운드에서 다운로드합니다.`)
+      } else {
+        setUpdateMsg('최신 버전을 사용 중입니다.')
+      }
+    } catch (err) {
+      setUpdateMsg('확인 실패: ' + String(err))
+    } finally {
+      setChecking(false)
+    }
+  }
 
   async function loadSettings() {
     try {
@@ -200,6 +225,29 @@ export default function Settings() {
           }}>📂 변경</button>
         </div>
         {dbStatus && <div style={{ fontSize: 12, color: dbStatus.includes('❌') ? 'var(--danger)' : 'var(--success)' }}>{dbStatus}</div>}
+      </div>
+
+      {/* 앱 버전 / 업데이트 */}
+      <div className="card">
+        <h3 style={{ fontSize: 15, marginBottom: 16 }}>앱 버전 및 업데이트</h3>
+        <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 12 }}>
+          현재 버전 <strong style={{ color: 'var(--text-primary)' }}>v{appVersion || '...'}</strong><br />
+          새 버전은 앱 시작 시 자동으로 확인하고 내려받습니다. 다운로드가 끝나면 재시작 안내가 표시되며,
+          재시작하지 않아도 앱을 완전히 종료할 때 설치됩니다.
+        </p>
+        <button className="btn btn-outline" onClick={handleCheckUpdate} disabled={checking} style={{ marginBottom: 8 }}>
+          🔄 {checking ? '확인 중...' : '업데이트 확인'}
+        </button>
+        {updateMsg && (
+          <div style={{ fontSize: 12, marginTop: 4, color: updateMsg.includes('실패') ? 'var(--danger)' : 'var(--text-secondary)' }}>
+            {updateMsg}
+          </div>
+        )}
+        {logPath && (
+          <div style={{ fontSize: 11, marginTop: 12, color: 'var(--text-secondary)', fontFamily: 'monospace', wordBreak: 'break-all' }}>
+            로그 파일: {logPath}
+          </div>
+        )}
       </div>
 
       {/* CSV 일괄 복구 */}

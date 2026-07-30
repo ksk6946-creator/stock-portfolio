@@ -103,4 +103,19 @@ contextBridge.exposeInMainWorld('api', {
     getPath: () => ipcRenderer.invoke('db:getPath'),
     setPath: (newPath: string) => ipcRenderer.invoke('db:setPath', newPath),
   },
+  updater: {
+    // 업데이트 상태 구독. 반환된 함수를 호출하면 구독 해제
+    onStatus: (callback: (status: any) => void) => {
+      const listener = (_e: unknown, status: any) => callback(status)
+      ipcRenderer.on('update-status', listener)
+      return () => ipcRenderer.removeListener('update-status', listener)
+    },
+    getStatus: () => ipcRenderer.invoke('update:getStatus'),
+    check: () => ipcRenderer.invoke('update:check'),
+    restart: () => ipcRenderer.invoke('update:restart'),
+  },
+  app: {
+    getVersion: () => ipcRenderer.invoke('app:getVersion'),
+    getLogPath: () => ipcRenderer.invoke('app:getLogPath'),
+  },
 })

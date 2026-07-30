@@ -3,6 +3,7 @@ import path from 'path'
 import { fileURLToPath } from 'url'
 import https from 'https'
 import electronUpdater from 'electron-updater'
+import log from 'electron-log/main'
 const { autoUpdater } = electronUpdater
 import {
   initDatabase, getAllTrades, addTrade, addManyTrades, updateTrade, deleteTrade,
@@ -19,6 +20,13 @@ import {
 } from './database'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
+
+// 로그 파일: %APPDATA%\StockAssistant(ksk)\logs\main.log
+// 메인 프로세스의 console.log/error 를 파일로 함께 남깁니다.
+// (렌더러 로깅용 log.initialize() 는 번들 환경에서 preload 경로가 깨지므로 사용하지 않습니다)
+log.transports.file.level = 'info'
+log.transports.console.level = 'info'
+Object.assign(console, log.functions)
 
 let mainWindow: BrowserWindow | null = null
 
@@ -216,6 +224,62 @@ function createWindow() {
 
 let dbReady = false
 
+// === 자동 업데이트 ===
+type UpdateStatus =
+  | { type: 'idle' }
+  | { type: 'dev' }
+  | { type: 'checking' }
+  | { type: 'available'; version: string }
+  | { type: 'not-available'; version: string }
+  | { type: 'progress'; percent: number; version: string }
+  | { type: 'downloaded'; version: string }
+  | { type: 'error'; message: string }
+
+// 렌더러가 아직 준비되지 않았을 때 보낸 상태가 유실되지 않도록 마지막 상태를 보관
+let lastUpdateStatus: UpdateStatus = { type: 'idle' }
+
+function setUpdateStatus(status: UpdateStatus) {
+  lastUpdateStatus = status
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('update-status', status)
+  }
+}
+
+let updaterReady = false
+
+function setupAutoUpdater() {
+  if (updaterReady) return
+  updaterReady = true
+
+  autoUpdater.logger = log
+  autoUpdater.autoDownload = true
+  autoUpdater.autoInstallOnAppQuit = true
+
+  autoUpdater.on('checking-for-update', () => {
+    log.info('[UPDATE] 확인 중...')
+    setUpdateStatus({ type: 'checking' })
+  })
+  autoUpdater.on('update-available', (info) => {
+    log.info('[UPDATE] 새 버전 발견:', info.version)
+    setUpdateStatus({ type: 'available', version: info.version })
+  })
+  autoUpdater.on('update-not-available', (info) => {
+    log.info('[UPDATE] 최신 버전입니다:', info.version)
+    setUpdateStatus({ type: 'not-available', version: info.version })
+  })
+  autoUpdater.on('download-progress', (p) => {
+    setUpdateStatus({ type: 'progress', percent: Math.round(p.percent), version: autoUpdater.currentVersion?.version ?? '' })
+  })
+  autoUpdater.on('update-downloaded', (info) => {
+    log.info('[UPDATE] 다운로드 완료:', info.version)
+    setUpdateStatus({ type: 'downloaded', version: info.version })
+  })
+  autoUpdater.on('error', (err) => {
+    log.error('[UPDATE] 오류:', err)
+    setUpdateStatus({ type: 'error', message: String(err?.message || err) })
+  })
+}
+
 app.whenReady().then(() => {
   try {
     initDatabase()
@@ -230,18 +294,13 @@ app.whenReady().then(() => {
 
   // 앱 시작 시 자동 업데이트 확인 (개발 모드 제외)
   if (!process.env.VITE_DEV_SERVER_URL) {
-    autoUpdater.autoDownload = true
-    autoUpdater.autoInstallOnAppQuit = true
-    autoUpdater.checkForUpdatesAndNotify().catch(err => console.error('[APP] Update check failed:', err))
-
-    autoUpdater.on('update-available', (info) => {
-      console.log('[APP] Update available:', info.version)
-      mainWindow?.webContents.send('update-status', { type: 'available', version: info.version })
+    setupAutoUpdater()
+    autoUpdater.checkForUpdates().catch(err => {
+      log.error('[UPDATE] 확인 실패:', err)
+      setUpdateStatus({ type: 'error', message: String(err?.message || err) })
     })
-    autoUpdater.on('update-downloaded', (info) => {
-      console.log('[APP] Update downloaded:', info.version)
-      mainWindow?.webContents.send('update-status', { type: 'downloaded', version: info.version })
-    })
+  } else {
+    setUpdateStatus({ type: 'dev' })
   }
 
   // 앱 시작 시 시세 자동 업데이트 (5초 후, 창이 뜬 뒤 실행)
@@ -257,8 +316,32 @@ app.whenReady().then(() => {
 
 // 업데이트 다운로드 완료 후 재시작 IPC
 ipcMain.handle('update:restart', () => {
-  autoUpdater.quitAndInstall()
+  log.info('[UPDATE] 재시작 후 설치 요청')
+  setImmediate(() => autoUpdater.quitAndInstall())
+  return true
 })
+
+// 현재 업데이트 상태 조회 (렌더러 마운트 시점 동기화용)
+ipcMain.handle('update:getStatus', () => lastUpdateStatus)
+
+// 수동 업데이트 확인
+ipcMain.handle('update:check', async () => {
+  if (process.env.VITE_DEV_SERVER_URL) {
+    return { success: false, error: '개발 모드에서는 업데이트를 확인할 수 없습니다.' }
+  }
+  try {
+    setupAutoUpdater()
+    const r = await autoUpdater.checkForUpdates()
+    return { success: true, version: r?.updateInfo?.version }
+  } catch (err: any) {
+    log.error('[UPDATE] 수동 확인 실패:', err)
+    return { success: false, error: String(err?.message || err) }
+  }
+})
+
+// 앱 버전 / 로그 파일 경로
+ipcMain.handle('app:getVersion', () => app.getVersion())
+ipcMain.handle('app:getLogPath', () => log.transports.file.getFile().path)
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()

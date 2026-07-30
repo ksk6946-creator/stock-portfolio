@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import Sidebar from './components/Sidebar'
+import UpdateBanner from './components/UpdateBanner'
 import Dashboard from './pages/Dashboard'
 import AccountHoldings from './pages/AccountHoldings'
 import TradeHistory from './pages/TradeHistory'
@@ -65,6 +66,7 @@ export default function App() {
       <main className="main-content">
         {renderPage()}
       </main>
+      <UpdateBanner />
     </div>
   )
 }

@@ -110,12 +110,56 @@
 
 ---
 
+---
+
+## 2026-07-30 세션 추가 작업
+
+### ETF 종목코드 파싱 버그 수정 (v1.0.1)
+- 원인: 카카오 알림 종목명 파싱의 국내 종목코드 정규식이 `[A-Z]?\d{6}` (숫자 6자리)여서
+  `A0193T0`, `A0193W0`, `A0080Y0` 처럼 **영문이 섞인 6자리 코드**를 분리하지 못함
+- 결과: 종목명이 `KODEX SK하이닉스단일종목레버리지(A0193T0)` 형태로 저장되어 같은 종목이 별도 잔고로 쪼개짐
+  - 종목코드가 비어 있어 시세 자동 갱신에서도 누락됨
+- 수정: `A?[0-9][0-9A-Z]{5}` 로 변경 (`parseMiraeKakao`, `parseDividendKakao` 양쪽)
+
+### DB 정리 (1회성)
+- 백업: `backups/portfolio.before-dedup.2026-07-30T09-05-04.json`
+- 중복 매매내역 8건 삭제
+  - 레버리지 4건: 07-20 SK 8@13200, 07-28 SK 10@10500, 07-20 삼성 9@11900, 07-28 삼성 10@9900
+    (파서 수정 전/후 캡처가 겹쳐 이름이 달라 중복 체크를 통과함)
+  - 2024-01-18 CSV 4건: 씨제이제일제당, 현대모비스, 현대미포조선, 케이씨씨
+    (CSV 두 파일의 기간이 겹쳐 동일 배치가 두 번 임포트됨, created_at 14ms 차이)
+- 종목명 정규화 14건, 쪼개진 잔고 2건 병합 → trades 2155→2147, holdings 69→67
+- **주의**: 잔고(holdings)는 종목 CSV 스냅샷 기준이고 매매내역과 독립적임.
+  예) 현대모비스는 매매내역 계산 1주 vs 잔고 6주로 원래 다름.
+  따라서 전체 `recalcHolding` 호출은 금지. 종목별로 근거를 확인한 뒤 개별 처리해야 함.
+
+### 자동 업데이트 UI + 로깅 (v1.0.2)
+- `electron-log` 5.4.4 추가 (정확한 버전 고정, dependencies)
+  - 로그 파일: `%APPDATA%\StockAssistant(ksk)\logs\main.log`
+  - 메인 프로세스 `console.*` 를 파일로 리다이렉트, `autoUpdater.logger` 연결
+  - `log.initialize()` 는 **호출하지 않음** — 번들 환경에서 렌더러 preload 경로가 깨짐
+- 기존에 죽어 있던 코드 연결: main.ts가 `update-status` 를 보내는데 받는 쪽이 없었음
+  - 이벤트 핸들러를 `checkForUpdates()` **이전에** 등록 (기존엔 이후라 레이스)
+  - `lastUpdateStatus` 보관 + `update:getStatus` IPC → 렌더러 마운트 전 상태 유실 방지
+  - 추가 이벤트: checking / not-available / download-progress / error
+- 새 IPC: `update:check`, `update:getStatus`, `app:getVersion`, `app:getLogPath`
+- preload에 `updater`, `app` 네임스페이스 노출 (`onStatus` 는 구독 해제 함수 반환)
+- `UpdateBanner.tsx`: 우하단 토스트. 다운로드 중 진행률 → 완료 시 "지금 재시작" 버튼
+- 설정 화면에 "앱 버전 및 업데이트" 섹션 (현재 버전, 수동 확인, 로그 경로)
+
+---
+
 ## 알려진 이슈 / TODO
 - [ ] 일부 최신 ETF는 네이버 시세 API에서 조회 안 됨 (RISE AI전력인프라 등) — 종목 파일의 현재가로 대체 중
 - [ ] 다음 금융 빈 종목(보유0, 매매0)이 웹/API로 삭제 안 됨 — 그룹 삭제 후 재생성으로만 정리 가능
 - [ ] 카카오 캡처 시 CSV(결제일)와 카카오(체결일) 날짜 차이로 인한 중복 처리는 ±2일 규칙으로 완화했으나 완벽하지 않음
 - [ ] 모바일 조회 기능 (미착수) — GitHub Pages + Google Drive JSON 방식 논의됨
-- [ ] 자동 업데이트 실제 동작 테스트 (내일 예정)
+- [ ] 자동 업데이트 실제 동작 테스트
+  - v1.0.0 → v1.0.1 → v1.0.2 릴리스 완료
+  - 업데이트 배너는 v1.0.2부터 들어갔으므로, 배너 확인은 v1.0.3 릴리스 때 가능
+  - 검증 방법: 앱 실행 → 완전 종료 → 재실행 시 설정 화면의 버전 확인, 또는 로그 파일 확인
+- [ ] `package.json` 에 description / author 누락 (electron-builder 경고)
+- [ ] 앱 아이콘 미설정 (`public/icon.png` 없어서 기본 Electron 아이콘 사용 중)
 
 ## 데이터 현황 (세션 종료 시점)
 - HTS 입출금 내역 CSV(2행 헤더 형식)에서 전체 재구축 완료

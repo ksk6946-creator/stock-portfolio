@@ -227,6 +227,17 @@ export interface ParsedKakaoItem {
   }
 }
 
+// 자동 업데이트 상태
+export type UpdateStatus =
+  | { type: 'idle' }
+  | { type: 'dev' }
+  | { type: 'checking' }
+  | { type: 'available'; version: string }
+  | { type: 'not-available'; version: string }
+  | { type: 'progress'; percent: number; version: string }
+  | { type: 'downloaded'; version: string }
+  | { type: 'error'; message: string }
+
 // Electron API 타입
 declare global {
   interface Window {
@@ -321,6 +332,16 @@ declare global {
         getAllData: () => Promise<{ trades: number; holdings: number; monthly: number; transfers: number; dividends: number; accounts: number }>
         getPath: () => Promise<string>
         setPath: (newPath: string) => Promise<{ success: boolean; error?: string }>
+      }
+      updater: {
+        onStatus: (callback: (status: UpdateStatus) => void) => () => void
+        getStatus: () => Promise<UpdateStatus>
+        check: () => Promise<{ success: boolean; version?: string; error?: string }>
+        restart: () => Promise<boolean>
+      }
+      app: {
+        getVersion: () => Promise<string>
+        getLogPath: () => Promise<string>
       }
     }
   }
