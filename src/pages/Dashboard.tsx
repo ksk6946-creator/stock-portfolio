@@ -115,6 +115,11 @@ export default function Dashboard() {
 
   // 월 형식 통일: "2025/12" 또는 "2025-12" → "2025/12"
   function normalizeMonth(m: string) { return m.replace(/-/g, '/') }
+  // 진행 중인 달 판별.
+  // 월별 요약(monthly_summaries)에는 아직 끝나지 않은 달도 CSV 임포트 시점 값으로 들어있어서,
+  // 그 달의 end_asset 을 "월말 자산"으로 쓰면 과거 시점 값을 보게 된다.
+  const currentMonthKey = `${new Date().getFullYear()}/${String(new Date().getMonth() + 1).padStart(2, '0')}`
+  function isCurrentMonth(m: string) { return normalizeMonth(m) === currentMonthKey }
   // 월에서 연도/월 추출
   function splitMonth(m: string): [string, string] {
     const n = normalizeMonth(m)
@@ -162,21 +167,25 @@ export default function Dashboard() {
     return total
   }
 
-  const latestMonth = filteredMonthly.length > 0 ? filteredMonthly[filteredMonthly.length - 1].month : null
+  // 기준이 되는 마지막 "완료된" 달. 진행 중인 달은 제외해야 전월 대비가 실제 전월 기준이 된다.
+  const latestCompletedMonth = useMemo(() => {
+    const completed = filteredMonthly.filter(m => !isCurrentMonth(m.month))
+    return completed.length > 0 ? completed[completed.length - 1].month : null
+  }, [filteredMonthly])
 
   // 전월 대비 수익률
   const prevMonthReturn = useMemo(() => {
-    if (!latestMonth) return { profit: 0, rate: 0, baseAsset: 0 }
-    const baseAsset = getMonthEndAsset(latestMonth)
+    if (!latestCompletedMonth) return { profit: 0, rate: 0, baseAsset: 0 }
+    const baseAsset = getMonthEndAsset(latestCompletedMonth)
     if (baseAsset <= 0) return { profit: 0, rate: 0, baseAsset: 0 }
-    const [yStr, mStr] = splitMonth(latestMonth)
+    const [yStr, mStr] = splitMonth(latestCompletedMonth)
     const y = parseInt(yStr), m = parseInt(mStr)
     const nextMonth = m === 12 ? `${y + 1}/01` : `${y}/${String(m + 1).padStart(2, '0')}`
     const fromDate = `${nextMonth.replace('/', '-')}-01`
     const netTransfer = getNetTransfers(fromDate)
     const profit = currentTotalAsset - baseAsset - netTransfer
     return { profit, rate: baseAsset > 0 ? (profit / baseAsset) * 100 : 0, baseAsset }
-  }, [filteredMonthly, filteredTransfers, currentTotalAsset])
+  }, [latestCompletedMonth, filteredMonthly, filteredTransfers, currentTotalAsset])
 
   // 올해 수익률 — 작년 12월 end_asset 기준 (형식 무관)
   const ytdReturn = useMemo(() => {
@@ -209,7 +218,10 @@ export default function Dashboard() {
 
     for (const month of months) {
       const startAsset = getMonthStartAsset(month)
-      const endAsset = getMonthEndAsset(month)
+      // 진행 중인 달은 현재 실제 자산 사용 (월말 확정값이 아직 없음)
+      const endAsset = isCurrentMonth(month) && currentTotalAsset > 0
+        ? currentTotalAsset
+        : getMonthEndAsset(month)
       const [y, m] = splitMonth(month)
       const fromDate = `${y}-${m}-01`
       const lastDay = new Date(parseInt(y), parseInt(m), 0).getDate()
@@ -225,7 +237,7 @@ export default function Dashboard() {
       rows.push({ month, startAsset, endAsset, netTransfer, profit, rate, cumRate })
     }
     return rows
-  }, [filteredMonthly, filteredTransfers])
+  }, [filteredMonthly, filteredTransfers, currentTotalAsset])
 
   // 누적 수익률 — end_asset > 0인 가장 오래된 월 기준
   // 수익금 = 현재총자산 - 기준자산 - 순입출금
@@ -275,7 +287,12 @@ export default function Dashboard() {
         startAsset = prevYearEndAsset
       }
       const lastMonth = yearMonths[yearMonths.length - 1].month
-      const endAsset = getMonthEndAsset(lastMonth)
+      // 진행 중인 연도는 월별 요약의 end_asset 이 CSV 임포트 당시 값(과거 시점)이므로
+      // 현재 실제 자산을 사용한다. YTD 카드와 같은 기준이 되도록 맞춤
+      const isCurrentYear = year === String(new Date().getFullYear())
+      const endAsset = isCurrentYear && currentTotalAsset > 0
+        ? currentTotalAsset
+        : getMonthEndAsset(lastMonth)
 
       const fromDate = `${year}-01-01`
       const toDate = `${year}-12-31`
@@ -294,7 +311,7 @@ export default function Dashboard() {
       prevYearEndAsset = endAsset
     }
     return rows.reverse() // 최신 연도가 위로
-  }, [filteredMonthly, filteredTransfers])
+  }, [filteredMonthly, filteredTransfers, currentTotalAsset])
 
   // 월별 수익률 차트 데이터 (최근 24개월)
   const monthlyChartData = useMemo(() => {
@@ -312,8 +329,12 @@ export default function Dashboard() {
       if (!byMonth[m.month]) byMonth[m.month] = 0
       byMonth[m.month] += m.end_asset
     }
+    // 진행 중인 달은 현재 실제 자산으로 대체
+    for (const month of Object.keys(byMonth)) {
+      if (isCurrentMonth(month) && currentTotalAsset > 0) byMonth[month] = currentTotalAsset
+    }
     return Object.entries(byMonth).sort(([a], [b]) => a.localeCompare(b)).map(([month, asset]) => ({ month, asset }))
-  }, [filteredMonthly])
+  }, [filteredMonthly, currentTotalAsset])
 
   // 파이차트
   const pieData = useMemo(() =>
