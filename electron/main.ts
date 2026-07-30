@@ -506,6 +506,72 @@ function daumRequest(url: string, method: string, cookie: string, body?: string,
   })
 }
 
+/**
+ * 다음 금융 그룹에서 종목의 itemId를 찾고, 없으면 추가한 뒤 다시 조회합니다.
+ *
+ * 주의사항:
+ * - 다음 금융 API는 A 접두사가 없는 종목코드를 사용합니다 (A0193T0 -> 0193T0)
+ * - 먼저 목록을 조회해 기존 itemId를 재사용해야 합니다. 바로 POST 하면 중복 종목이 생깁니다
+ * - 응답 형태가 배열 / {data:[]} / 인덱스 객체 로 제각각이라 모두 대응해야 합니다
+ *
+ * 수동 동기화(daum:addItem)와 카카오 자동 동기화(daum:syncTrade)가 같은 로직을 쓰도록
+ * 공용 헬퍼로 분리했습니다. 예전에는 각자 구현이라 자동 동기화 쪽에만 A 접두사 처리가 빠져 있었습니다.
+ */
+async function daumFindOrAddItem(
+  cookie: string, groupId: number, stockCode: string
+): Promise<{ success: boolean; itemId?: number; error?: string }> {
+  const listUrl = `https://finance.daum.net/api/my/groups/${groupId}/items?includeQuote=true`
+  const referer = 'https://finance.daum.net/my'
+  // 다음 금융은 A 없는 코드를 사용
+  const daumCode = stockCode.replace(/^A/, '')
+
+  const parseItems = (body: string): any[] => {
+    try {
+      const parsed = JSON.parse(body)
+      if (Array.isArray(parsed)) return parsed
+      if (Array.isArray(parsed.data)) return parsed.data
+      if (Array.isArray(parsed.items)) return parsed.items
+      return Object.values(parsed).filter((v: any) => v && typeof v === 'object' && (v.myStockItemId || v.id))
+    } catch { return [] }
+  }
+
+  // 접두사 유무와 무관하게 비교
+  const findItemId = (items: any[]): number | null => {
+    const found = items.find((it: any) => {
+      const c = String(it?.symbolCode || it?.code || '')
+      return c.replace(/^A/, '') === daumCode
+    })
+    return found ? (found.myStockItemId || found.id || found.itemId || null) : null
+  }
+
+  try {
+    // 1. 기존 목록에서 찾기
+    const listResult = await daumRequest(listUrl, 'GET', cookie, undefined, referer)
+    if (listResult.ok) {
+      const existingId = findItemId(parseItems(listResult.body))
+      if (existingId) return { success: true, itemId: existingId }
+    }
+
+    // 2. 없으면 추가
+    const addResult = await daumRequest(listUrl, 'POST', cookie, JSON.stringify({ symbolCodes: [daumCode] }), referer)
+    if (!addResult.ok) {
+      return { success: false, error: `종목 추가 실패 (HTTP ${addResult.status}): ${addResult.body.slice(0, 150)}` }
+    }
+
+    // 3. 추가 후 재조회
+    await new Promise(r => setTimeout(r, 300))
+    const afterResult = await daumRequest(listUrl, 'GET', cookie, undefined, referer)
+    if (afterResult.ok) {
+      const newId = findItemId(parseItems(afterResult.body))
+      if (newId) return { success: true, itemId: newId }
+    }
+
+    return { success: false, error: `${stockCode}(${daumCode}) itemId 찾기 실패` }
+  } catch (err) {
+    return { success: false, error: String(err) }
+  }
+}
+
 function registerIpcHandlers() {
   // DB 상태 체크 핸들러
   ipcMain.handle('db:ready', () => {
@@ -714,57 +780,8 @@ function registerIpcHandlers() {
     }
   })
 
-  ipcMain.handle('daum:addItem', async (_e, cookie: string, groupId: number, stockCode: string) => {
-    try {
-      const listUrl = `https://finance.daum.net/api/my/groups/${groupId}/items?includeQuote=true`
-
-      // 목록 파싱 헬퍼 (배열 / {data:[]} / 인덱스객체 모두 대응)
-      const parseItems = (body: string): any[] => {
-        try {
-          const parsed = JSON.parse(body)
-          if (Array.isArray(parsed)) return parsed
-          if (Array.isArray(parsed.data)) return parsed.data
-          if (Array.isArray(parsed.items)) return parsed.items
-          // 인덱스 객체 형태
-          return Object.values(parsed).filter((v: any) => v && typeof v === 'object' && (v.myStockItemId || v.id))
-        } catch { return [] }
-      }
-
-      // symbolCode로 itemId 찾기
-      const findItemId = (items: any[]): number | null => {
-        const variants = [stockCode, stockCode.replace(/^A/, ''), 'A' + stockCode.replace(/^A/, '')]
-        const found = items.find((it: any) => {
-          const c = it.symbolCode || it.code || ''
-          return variants.some(v => c === v || c.replace(/^A/, '') === v.replace(/^A/, ''))
-        })
-        return found ? (found.myStockItemId || found.id || found.itemId || null) : null
-      }
-
-      // 1. 먼저 기존 목록에서 찾기
-      const listResult = await daumRequest(listUrl, 'GET', cookie, undefined, 'https://finance.daum.net/my')
-      if (listResult.ok) {
-        const existingId = findItemId(parseItems(listResult.body))
-        if (existingId) return { success: true, itemId: existingId }
-      }
-
-      // 2. 없으면 추가 (A 접두사 제거 — 다음 금융은 A 없는 코드 사용)
-      const daumCode = stockCode.replace(/^A/, '')
-      const body = JSON.stringify({ symbolCodes: [daumCode] })
-      await daumRequest(listUrl, 'POST', cookie, body, 'https://finance.daum.net/my')
-
-      // 3. 추가 후 다시 조회해서 itemId 찾기
-      await new Promise(r => setTimeout(r, 300))
-      const afterResult = await daumRequest(listUrl, 'GET', cookie, undefined, 'https://finance.daum.net/my')
-      if (afterResult.ok) {
-        const newId = findItemId(parseItems(afterResult.body))
-        if (newId) return { success: true, itemId: newId }
-      }
-
-      return { success: false, error: `${stockCode} itemId 찾기 실패` }
-    } catch (err) {
-      return { success: false, error: String(err) }
-    }
-  })
+  ipcMain.handle('daum:addItem', (_e, cookie: string, groupId: number, stockCode: string) =>
+    daumFindOrAddItem(cookie, groupId, stockCode))
 
   ipcMain.handle('daum:addTrade', async (_e, cookie: string, groupId: number, itemId: number, trade: {
     tradeType: string; price: number; tradeQty: number; tradeDate: string; memo: string
@@ -846,21 +863,13 @@ function registerIpcHandlers() {
         }
       }
 
-      // 3. 종목 추가 (이미 있으면 itemId 반환)
-      const addUrl = `https://finance.daum.net/api/my/groups/${trade.groupId}/items?includeQuote=true`
-      const addBody = JSON.stringify({ symbolCodes: [trade.stockCode] })
-      const addReferer = `https://finance.daum.net/my?groupId=${trade.groupId}`
-      const addResult = await daumRequest(addUrl, 'POST', cookie, addBody, addReferer)
-      if (!addResult.ok) {
-        return { success: false, error: `종목 추가 실패 (HTTP ${addResult.status})` }
+      // 3. 종목 찾기 (없으면 추가) — 수동 동기화와 동일한 공용 헬퍼 사용
+      const itemResult = await daumFindOrAddItem(cookie, trade.groupId, trade.stockCode)
+      if (!itemResult.success || !itemResult.itemId) {
+        console.warn(`[DAUM] 동기화 실패 (${trade.stockName} ${trade.stockCode}): ${itemResult.error}`)
+        return { success: false, error: itemResult.error || '종목 itemId를 찾을 수 없음' }
       }
-      const addData = JSON.parse(addResult.body)
-      const items = addData.data || addData
-      const item = Array.isArray(items) ? items.find((it: any) => it.symbolCode === trade.stockCode || it.code === trade.stockCode) : null
-      const itemId = item?.myStockItemId || item?.id
-      if (!itemId) {
-        return { success: false, error: '종목 itemId를 찾을 수 없음' }
-      }
+      const itemId = itemResult.itemId
 
       // 4. 매매 등록
       const tradeUrl = `https://finance.daum.net/api/my/groups/${trade.groupId}/items/${itemId}/trades/details/`
@@ -875,11 +884,14 @@ function registerIpcHandlers() {
       const tradeReferer = `https://finance.daum.net/my/detail?groupId=${trade.groupId}&itemId=${itemId}`
       const tradeResult = await daumRequest(tradeUrl, 'POST', cookie, tradeBody, tradeReferer)
       if (!tradeResult.ok) {
+        console.warn(`[DAUM] 매매 등록 실패 (${trade.stockName} ${trade.tradeType} ${trade.quantity}@${trade.price}): HTTP ${tradeResult.status} ${tradeResult.body.slice(0, 150)}`)
         return { success: false, error: `매매 등록 실패 (HTTP ${tradeResult.status})` }
       }
 
+      console.log(`[DAUM] 동기화 완료: ${trade.stockName} ${trade.tradeType} ${trade.quantity}주 @${trade.price} (itemId=${itemId})`)
       return { success: true, itemId }
     } catch (err) {
+      console.error(`[DAUM] 동기화 오류 (${trade.stockName}):`, err)
       return { success: false, error: String(err) }
     }
   })

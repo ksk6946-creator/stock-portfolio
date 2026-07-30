@@ -210,6 +210,9 @@ export default function DataInput() {
         .filter((t: any) => t.transfer_date.slice(0, 10) >= cutoffStr)
 
       let newCount = 0, skipCount = 0, oldSkipCount = 0
+      // 다음 금융 동기화 결과 집계
+      let daumOkCount = 0, daumFailCount = 0
+      const daumFailReasons = new Set<string>()
 
       for (const item of reversed) {
         if (!item.isValid) continue
@@ -275,16 +278,24 @@ export default function DataInput() {
           const stockCode = r._stockCode || ''
           await window.api.trades.addWithHolding(trade, stockCode)
 
-          // 다음 금융 자동 동기화
+          // 다음 금융 자동 동기화 (실패해도 매매 저장 자체는 유지, 대신 건수를 집계해 알림)
           if (daumReady && stockCode && !r._currency) {
             const gid = getDaumGroupId(item.account)
             if (gid) {
               try {
-                await window.api.daum.syncTrade({
+                const sync = await window.api.daum.syncTrade({
                   stockCode, stockName: r.stock_name, tradeType: r.trade_type,
                   price: r.price, quantity: r.quantity, tradeDate: r.trade_date, groupId: gid
                 })
-              } catch { /* 무시 */ }
+                if (sync?.success) daumOkCount++
+                else {
+                  daumFailCount++
+                  daumFailReasons.add(sync?.error || '알 수 없는 오류')
+                }
+              } catch (err) {
+                daumFailCount++
+                daumFailReasons.add(String(err))
+              }
             }
           }
         } else if (item.type === 'dividend' && item.dividend) {
@@ -308,7 +319,11 @@ export default function DataInput() {
       if (newCount > 0) parts.push(`새로 ${newCount}건 저장`)
       if (skipCount > 0) parts.push(`중복 ${skipCount}건 건너뜀`)
       if (oldSkipCount > 0) parts.push(`기간 외 ${oldSkipCount}건 제외`)
-      setCaptureStatus(`✅ ${parts.join(', ')}`)
+      if (daumOkCount > 0) parts.push(`다음 금융 ${daumOkCount}건 동기화`)
+      if (daumFailCount > 0) {
+        parts.push(`다음 금융 ${daumFailCount}건 실패 (${[...daumFailReasons].slice(0, 2).join(' / ')})`)
+      }
+      setCaptureStatus(`${daumFailCount > 0 ? '⚠️' : '✅'} ${parts.join(', ')}`)
       if (newCount > 0) loadRecentTrades()
     } catch (err) {
       setCaptureStatus(`❌ 캡처 실패: ${String(err)}`)
