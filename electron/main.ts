@@ -91,7 +91,9 @@ async function fetchStockPrice(stockCode: string, _stockName: string): Promise<n
       }
     } else {
       // 미국주식: Yahoo Finance API
-      const url = `https://query1.finance.yahoo.com/v8/finance/chart/${stockCode}?interval=1d&range=1d`
+      // 클래스 주식은 Yahoo가 하이픈을 사용 (BRK.B -> BRK-B)
+      const yahooCode = stockCode.replace(/\./g, '-')
+      const url = `https://query1.finance.yahoo.com/v8/finance/chart/${yahooCode}?interval=1d&range=1d`
       const response = await net.fetch(url, {
         headers: { 'User-Agent': 'Mozilla/5.0' }
       })
@@ -309,6 +311,9 @@ app.whenReady().then(() => {
       console.log('[APP] Auto price update starting...')
       updatePricesOnly().then(r => {
         console.log(`[APP] Auto price update done: ${r.updated}/${r.total} (failed: ${r.failed.length})`)
+        if (r.failed.length > 0) {
+          console.warn('[APP] 시세 조회 실패 종목:', r.failed.join(', '))
+        }
       }).catch(err => console.error('[APP] Auto price update error:', err))
     }
   }, 5000)
@@ -577,35 +582,32 @@ function registerIpcHandlers() {
 
   ipcMain.handle('stock:searchCode', async (_e, stockName: string) => {
     try {
-      // 1차: 네이버 금융 HTML 검색
-      const url = `https://finance.naver.com/search/searchList.naver?query=${encodeURIComponent(stockName)}`
+      // 네이버 종목 자동완성 API (JSON)
+      // 영문이 섞인 ETF/ETN 코드도 조회됨 (예: KODEX SK하이닉스단일종목레버리지 -> 0193T0)
+      // 이전에 쓰던 finance.naver.com/search/searchList.naver 는 404, 다음 검색은 JS 렌더링으로 코드 추출 불가
+      const url = `https://ac.stock.naver.com/ac?q=${encodeURIComponent(stockName)}&target=stock`
       const response = await net.fetch(url, {
         headers: { 'User-Agent': 'Mozilla/5.0' }
       })
       if (response.ok) {
-        const html = await response.text()
-        const match = html.match(/code=(\d{6})/)
-        if (match) return { success: true, code: 'A' + match[1] }
+        const data = await response.json() as any
+        const items: any[] = Array.isArray(data?.items) ? data.items : []
+        const domestic = items.filter(i => i?.nationCode === 'KOR' && i?.code)
+        // 종목명이 정확히 일치하는 것을 우선 선택 (동명이인/유사명 오매칭 방지)
+        const pick = domestic.find(i => i.name === stockName) || domestic[0]
+        if (pick?.code) {
+          const code = String(pick.code)
+          if (pick.name !== stockName) {
+            console.log(`[STOCK] "${stockName}" -> "${pick.name}" (A${code}) 근사 매칭`)
+          }
+          return { success: true, code: code.startsWith('A') ? code : 'A' + code }
+        }
       }
 
-      // 2차: 다음 금융 검색 API
-      const daumUrl = `https://search.daum.net/search?w=stock&q=${encodeURIComponent(stockName)}&DA=MOR&rtmaxcoll=MOR`
-      const daumResp = await net.fetch(daumUrl, {
-        headers: { 'User-Agent': 'Mozilla/5.0' }
-      })
-      if (daumResp.ok) {
-        const html = await daumResp.text()
-        // symbolCode 또는 종목코드 패턴 찾기
-        const match = html.match(/symbolCode['":\s]+A?(\d{6})/) || html.match(/code['":\s]+A?(\d{6})/)
-        if (match) return { success: true, code: 'A' + match[1] }
-      }
-
-      // 3차: KRX 정보데이터시스템
-      const krxUrl = `https://data-dbg.krx.co.kr/svc/apis/sto/stk_isu_base_info?AUTH_KEY=&ISU_NM=${encodeURIComponent(stockName)}`
-      console.log(`Stock search failed for: ${stockName}`)
+      console.warn(`[STOCK] 종목코드 검색 실패: ${stockName}`)
       return { success: false }
     } catch (err) {
-      console.error(`Stock search error for ${stockName}:`, err)
+      console.error(`[STOCK] 종목코드 검색 오류 (${stockName}):`, err)
       return { success: false }
     }
   })

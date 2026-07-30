@@ -227,6 +227,8 @@ export default function DataInput() {
           const r = item.trade
           const rDate = new Date(r.trade_date.slice(0, 10)).getTime()
           isDuplicate = existingTrades.some((t: any) => {
+            // 계좌가 다르면 별개 거래 (메인/ISA에 같은 종목을 같은 수량·단가로 매수하는 경우가 있음)
+            if (t.account !== item.account) return false
             if (t.stock_name !== r.stock_name || t.trade_type !== r.trade_type || t.quantity !== r.quantity || t.price !== r.price) return false
             const tDate = new Date(t.trade_date.slice(0, 10)).getTime()
             const dayDiff = Math.abs(tDate - rDate) / 86400000
@@ -238,6 +240,7 @@ export default function DataInput() {
           const d = item.dividend
           const dDate = new Date(item.date.slice(0, 10)).getTime()
           isDuplicate = existingDividends.some((e: any) => {
+            if (e.account_name !== item.account) return false
             if (!((e.stock_code === d.stockCode || e.stock_name === d.stockName) && e.amount === d.amount)) return false
             const eDate = new Date(e.dividend_date.slice(0, 10)).getTime()
             return Math.abs(eDate - dDate) <= 2 * 86400000
@@ -246,6 +249,8 @@ export default function DataInput() {
           const t = item.transfer
           const tDate = new Date(item.date.slice(0, 10)).getTime()
           isDuplicate = existingTransfers.some((e: any) => {
+            // 계좌가 다르면 별개 입출금 (같은 날 메인/ISA에 같은 금액을 입금하는 경우가 있음)
+            if (e.account_name !== item.account) return false
             if (e.transfer_type !== t.transferType || e.amount !== t.amount) return false
             const eDate = new Date(e.transfer_date.slice(0, 10)).getTime()
             return Math.abs(eDate - tDate) <= 2 * 86400000
