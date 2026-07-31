@@ -28,11 +28,22 @@ export default function DataInput() {
   const [chatRoomName, setChatRoomName] = useState('미래에셋')
   const [captureMonths, setCaptureMonths] = useState<number>(7) // 중복 체크 기간 (일 단위)
 
-  // 계좌 → 다음 금융 그룹 ID 매핑
-  const accountGroupMap: Record<string, number> = {
-    '72480': 4,   // [선근] 메인 → 그룹 4
-    '18160': 5,   // [선근] ISA → 그룹 5
-  }
+  // 계좌 → 다음 금융 그룹 ID 매핑 (DB 설정에서 읽음)
+  const [accountGroupMap, setAccountGroupMap] = useState<Record<string, number>>({
+    '72480': 4,   // 기본값 fallback
+    '18160': 5,
+  })
+
+  useEffect(() => {
+    window.api.settings.get('daumAccountGroupMap').then((saved: any) => {
+      if (saved && typeof saved === 'object') {
+        // 값이 문자열로 저장됐을 수 있으니 숫자로 변환
+        const numMap: Record<string, number> = {}
+        for (const [k, v] of Object.entries(saved)) numMap[k] = Number(v)
+        setAccountGroupMap(numMap)
+      }
+    }).catch(() => {})
+  }, [])
 
   function getDaumGroupId(accountName: string): number | null {
     const match = accountName.match(/\((\d+)\)/)

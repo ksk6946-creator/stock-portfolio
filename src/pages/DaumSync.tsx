@@ -29,11 +29,12 @@ export default function DaumSync() {
   const [loggingIn, setLoggingIn] = useState(false)
   const [showManualCookie, setShowManualCookie] = useState(false)
 
-  // 계좌 → 다음 금융 그룹 ID 매핑
-  const accountGroupMap: Record<string, string> = {
-    '72480': '4',   // [선근] 메인 → 그룹 4
-    '18160': '5',   // [선근] ISA → 그룹 5
-  }
+  // 계좌 → 다음 금융 그룹 ID 매핑 (DB 설정에서 읽음. 하드코딩 제거)
+  // 설정키: 'daumAccountGroupMap' = { '72480': '4', '18160': '5', ... }
+  const [accountGroupMap, setAccountGroupMap] = useState<Record<string, string>>({
+    '72480': '4',   // 기본값 (설정 로드 전 fallback)
+    '18160': '5',
+  })
 
   // 계좌명에서 괄호 안 숫자 추출하여 그룹 ID 반환
   function getGroupIdForAccount(accountName: string): string | null {
@@ -53,16 +54,18 @@ export default function DaumSync() {
 
   async function loadData() {
     try {
-      const [accts, savedCookie, savedGroupId, savedSyncedIds] = await Promise.all([
+      const [accts, savedCookie, savedGroupId, savedSyncedIds, savedGroupMap] = await Promise.all([
         window.api.accounts.getAll(),
         window.api.settings.get('daumCookie'),
         window.api.settings.get('daumGroupId'),
-        window.api.settings.get('daumSyncedTradeIds')
+        window.api.settings.get('daumSyncedTradeIds'),
+        window.api.settings.get('daumAccountGroupMap'),
       ])
       setAccounts(accts)
       if (savedCookie) setCookie(savedCookie)
       if (savedGroupId) setGroupId(savedGroupId)
       if (savedSyncedIds) setSyncedTradeIds(new Set(savedSyncedIds))
+      if (savedGroupMap && typeof savedGroupMap === 'object') setAccountGroupMap(savedGroupMap)
 
       // 저장된 세션 쿠키가 있으면 자동 복원 시도
       let activeCookie = savedCookie || ''
@@ -136,6 +139,23 @@ export default function DaumSync() {
           const firstId = String(groupResult.groups[0]?.id || groupResult.groups[0]?.groupId || '1')
           setGroupId(firstId)
         }
+        // 그룹-계좌 자동 매핑 갱신
+        // 그룹 이름에 계좌번호 뒷자리(72480, 18160 등)가 포함된 경우 매핑 업데이트
+        const newMap: Record<string, string> = { ...accountGroupMap }
+        for (const g of groupResult.groups) {
+          const gid = String(g.id || g.groupId || '')
+          const gname = String(g.name || g.groupName || '')
+          for (const acctNum of Object.keys(newMap)) {
+            if (gname.includes(acctNum)) {
+              if (newMap[acctNum] !== gid) {
+                addLog(`📌 계좌 ${acctNum} 그룹 ID 업데이트: ${newMap[acctNum]} → ${gid}`)
+                newMap[acctNum] = gid
+              }
+            }
+          }
+        }
+        setAccountGroupMap(newMap)
+        await window.api.settings.set('daumAccountGroupMap', newMap)
       }
     } else {
       setCookieValid(false)
@@ -421,7 +441,8 @@ export default function DaumSync() {
                     placeholder="그룹 ID (로그인 후 자동 로드)" style={{ maxWidth: 250 }} />
                 )}
                 <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 4 }}>
-                  메인(72480) → 그룹 4, ISA(18160) → 그룹 5 (계좌 선택 시 자동 설정됨)
+                  {Object.entries(accountGroupMap).map(([acct, gid]) => `${acct} → 그룹 ${gid}`).join(', ')}
+                  {' '}(로그인 후 그룹 조회 시 자동 갱신)
                 </div>
               </div>
               <div style={{ padding: '8px 12px', marginBottom: 8, borderRadius: 6, background: 'rgba(66,99,235,0.06)', fontSize: 12, lineHeight: 1.6 }}>
@@ -443,7 +464,10 @@ export default function DaumSync() {
             보유수량 0인 종목을 다음 금융에서 삭제합니다.
           </p>
           <button className="btn btn-outline" onClick={async () => {
-            const groups = [{ id: 1, name: '메인' }, { id: 3, name: 'ISA' }]
+            // 현재 알려진 그룹 목록 사용 (없으면 설정의 매핑에서 추출)
+            const groups = daumGroups.length > 0
+              ? daumGroups.map((g: any) => ({ id: g.id || g.groupId, name: g.name || g.groupName || String(g.id || g.groupId) }))
+              : [...new Set(Object.values(accountGroupMap))].map(id => ({ id: Number(id), name: `그룹 ${id}` }))
             for (const g of groups) {
               addLog(`그룹 ${g.id} (${g.name}) 보유수량 0 종목 조회 중...`)
               const result = await window.api.daum.getEmptyItems(cookie, g.id)
