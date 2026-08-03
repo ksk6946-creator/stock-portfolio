@@ -9,3 +9,4 @@ release/
 .gh-token.txt
 *.token
 tsconfig.tsbuildinfo
+_tmp*
