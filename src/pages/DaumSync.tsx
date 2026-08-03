@@ -342,15 +342,17 @@ export default function DaumSync() {
           addLog(`  📋 기존 매매 ${existingTrades.length}건 조회됨`)
           addLog(`  📋 샘플: type=${sample.tradeType}, date=${sample.tradeDate}, price=${sample.price}, qty=${sample.tradeQty}`)
         }
-        const existingKeys = new Set(
-          existingTrades.map((t: any) => {
-            const type = t.tradeType || ''
-            const price = Math.round(Number(t.price) || 0)
-            const qty = Number(t.tradeQty) || 0
-            const date = String(t.tradeDate || '').replace(/[-/]/g, '').slice(0, 8)
-            return `${type}_${date}_${price}_${qty}`
-          })
-        )
+        // 중복 판정은 "개수"로 해야 한다.
+        // Set 으로 하면 같은 날 같은 가격의 분할매수가 2건일 때 1건만 있는 것으로 보고 둘 다 건너뛴다.
+        const existingCounts = new Map<string, number>()
+        for (const t of existingTrades) {
+          const type = t.tradeType || ''
+          const price = Math.round(Number(t.price) || 0)
+          const qty = Number(t.tradeQty) || 0
+          const date = String(t.tradeDate || '').replace(/[-/]/g, '').slice(0, 8)
+          const k = `${type}_${date}_${price}_${qty}`
+          existingCounts.set(k, (existingCounts.get(k) || 0) + 1)
+        }
         addLog(`  🔍 ${item.stockName}: 기존 ${existingTrades.length}건, 등록대상 ${item.trades.length}건`)
 
         // 4. 매매내역 등록
@@ -358,23 +360,22 @@ export default function DaumSync() {
         let skippedCount = 0
         const newSyncedIds = new Set(syncedTradeIds)
         for (const trade of item.trades) {
-          // 이미 동기화된 매매는 스킵 (로컬 ID 기반)
-          if (syncedTradeIds.has(trade.id)) {
-            skippedCount++
-            continue
-          }
-          // 다음 금융에 이미 같은 매매가 있으면 스킵 (날짜+타입+가격+수량)
+          // 중복 판정은 다음 금융의 실제 내역만 기준으로 한다.
+          // 로컬 ID 기록(syncedTradeIds)은 그룹을 삭제/재생성하면 실제와 어긋나므로 쓰지 않는다.
           const tradeType = trade.trade_type === 'BUY' ? 'P' : 'S'
           const tradeDate = trade.trade_date.replace(/[-/]/g, '').slice(0, 8)
           const key = `${tradeType}_${tradeDate}_${Math.round(trade.price)}_${trade.quantity}`
-          if (existingKeys.has(key)) {
+          const remaining = existingCounts.get(key) || 0
+          if (remaining > 0) {
+            // 같은 거래가 이미 그만큼 있으므로 하나 소진하고 스킵
+            existingCounts.set(key, remaining - 1)
             skippedCount++
             newSyncedIds.add(trade.id)
             continue
           }
           // 첫 건만 키 비교 로그
           if (successCount === 0 && skippedCount === 0) {
-            addLog(`  🔑 등록키: ${key} | 기존키 예시: ${[...existingKeys].slice(0, 3).join(', ')}`)
+            addLog(`  🔑 등록키: ${key} | 기존키 예시: ${[...existingCounts.keys()].slice(0, 3).join(', ')}`)
           }
           const tradeResult = await window.api.daum.addTrade(activeCookie, parseInt(groupId), itemId, {
             tradeType: trade.trade_type === 'BUY' ? 'P' : 'S',
@@ -413,8 +414,51 @@ export default function DaumSync() {
       await new Promise(r => setTimeout(r, 500))
     }
 
+    // 동기화 후 검증: 다음 금융의 실제 보유수량과 앱 잔고를 비교
+    addLog('🔎 동기화 결과 검증 중...')
+    await verifyAgainstDaum(activeCookie)
+
     setSyncing(false)
     addLog('🏁 동기화 완료')
+  }
+
+  /** 다음 금융의 보유수량과 앱 잔고를 비교해 불일치를 로그로 보고합니다 */
+  async function verifyAgainstDaum(cookieStr?: string) {
+    const useCookie = cookieStr || cookie
+    if (!useCookie || !selectedAccount) { addLog('검증: 계좌를 선택해주세요'); return }
+    try {
+      const gid = parseInt(groupId)
+      const result = await window.api.daum.getItems(useCookie, gid)
+      if (!result.success) { addLog(`검증 실패: ${result.error}`); return }
+
+      const holdings = await window.api.holdings.get(selectedAccount)
+      const stripA = (c: string) => String(c || '').replace(/^A/, '')
+      let ok = 0
+      const mismatches: string[] = []
+
+      for (const h of holdings) {
+        const item = result.items.find(i =>
+          stripA(i.symbolCode) === stripA(h.stock_code) || i.name === h.stock_name)
+        if (!item) { mismatches.push(`${h.stock_name}: 다음 금융에 종목 없음 (앱 ${h.quantity}주)`); continue }
+        if (item.holdingVolume !== h.quantity) {
+          mismatches.push(`${h.stock_name}: 다음 ${item.holdingVolume}주 vs 앱 ${h.quantity}주 (차이 ${h.quantity - item.holdingVolume})`)
+        } else ok++
+      }
+
+      // 앱 잔고에 없는데 다음 금융에 수량이 남은 종목
+      for (const item of result.items) {
+        if (item.holdingVolume <= 0) continue
+        const h = holdings.find(x =>
+          stripA(x.stock_code) === stripA(item.symbolCode) || x.stock_name === item.name)
+        if (!h) mismatches.push(`${item.name}: 앱 잔고에 없는데 다음 금융에 ${item.holdingVolume}주 남음`)
+      }
+
+      addLog(`✅ 일치 ${ok}종목 / ❌ 불일치 ${mismatches.length}종목`)
+      for (const m of mismatches) addLog(`   ${m}`)
+      if (mismatches.length === 0) addLog('   다음 금융과 앱 잔고가 모두 일치합니다.')
+    } catch (err) {
+      addLog(`검증 오류: ${err}`)
+    }
   }
 
   if (!loaded) {
@@ -671,6 +715,10 @@ export default function DaumSync() {
                 addLog(`🗑️ ${selectedStocks.size}개 종목 동기화 기록 초기화 (${selectedTradeIds.length}건)`)
               }}>
               🗑️ 선택 종목 기록 초기화
+            </button>
+            <button className="btn btn-outline" style={{ marginLeft: 6 }} disabled={syncing || !cookie || !selectedAccount}
+              onClick={() => verifyAgainstDaum()}>
+              🔎 수량 검증
             </button>
           </div>
           <div className="table-container">

@@ -86,6 +86,8 @@ contextBridge.exposeInMainWorld('api', {
       ipcRenderer.invoke('daum:deleteItems', cookie, groupId, symbolCodes),
     getEmptyItems: (cookie: string, groupId: number) =>
       ipcRenderer.invoke('daum:getEmptyItems', cookie, groupId),
+    getItems: (cookie: string, groupId: number) =>
+      ipcRenderer.invoke('daum:getItems', cookie, groupId),
     addTrade: (cookie: string, groupId: number, itemId: number, trade: any) =>
       ipcRenderer.invoke('daum:addTrade', cookie, groupId, itemId, trade),
     deleteTrade: (cookie: string, groupId: number, itemId: number, tradeId: number) =>

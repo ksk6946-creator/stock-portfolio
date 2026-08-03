@@ -780,6 +780,29 @@ function registerIpcHandlers() {
     }
   })
 
+  // 다음 금융 그룹의 전체 종목 + 보유수량 조회 (동기화 결과 검증용)
+  ipcMain.handle('daum:getItems', async (_e, cookie: string, groupId: number) => {
+    try {
+      const url = `https://finance.daum.net/api/my/groups/${groupId}/items?includeQuote=true`
+      const result = await daumRequest(url, 'GET', cookie, undefined, 'https://finance.daum.net/my')
+      if (!result.ok) return { success: false, error: `HTTP ${result.status}`, items: [] }
+      const parsed = JSON.parse(result.body)
+      const raw = Array.isArray(parsed) ? parsed
+        : Array.isArray(parsed.data) ? parsed.data
+        : Array.isArray(parsed.items) ? parsed.items
+        : Object.values(parsed).filter((v: any) => v && typeof v === 'object' && (v.myStockItemId || v.id))
+      const items = raw.map((it: any) => ({
+        name: it.name,
+        symbolCode: it.symbolCode || it.code || '',
+        holdingVolume: Number(it.holdingVolume) || 0,
+        averagePrice: Number(it.averagePrice ?? it.avgPrice ?? 0) || 0,
+      }))
+      return { success: true, items }
+    } catch (err) {
+      return { success: false, error: String(err), items: [] }
+    }
+  })
+
   // 다음 금융 보유수량 0인 종목 조회
   ipcMain.handle('daum:getEmptyItems', async (_e, cookie: string, groupId: number) => {
     try {

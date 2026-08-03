@@ -334,6 +334,7 @@ declare global {
         addItem: (cookie: string, groupId: number, stockCode: string) => Promise<{ success: boolean; itemId?: number; error?: string; raw?: string }>
         deleteItems: (cookie: string, groupId: number, symbolCodes: string[]) => Promise<{ success: boolean; status?: number; error?: string }>
         getEmptyItems: (cookie: string, groupId: number) => Promise<{ success: boolean; items: { name: string; symbolCode: string }[]; error?: string }>
+        getItems: (cookie: string, groupId: number) => Promise<{ success: boolean; items: { name: string; symbolCode: string; holdingVolume: number; averagePrice: number }[]; error?: string }>
         addTrade: (cookie: string, groupId: number, itemId: number, trade: { tradeType: string; price: number; tradeQty: number; tradeDate: string; memo: string }) => Promise<{ success: boolean; error?: string }>
         deleteTrade: (cookie: string, groupId: number, itemId: number, tradeId: number) => Promise<{ success: boolean; status?: number; error?: string }>
         syncTrade: (trade: { stockCode: string; stockName: string; tradeType: 'BUY' | 'SELL'; price: number; quantity: number; tradeDate: string; groupId: number }) => Promise<{ success: boolean; itemId?: number; error?: string }>
