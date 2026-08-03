@@ -538,12 +538,16 @@ export function calculatePortfolio() {
 // 차이만큼 보정 거래를 만들어 매매내역 계산 결과가 잔고와 일치하도록 맞춘다.
 const ADJUST_SOURCE = 'adjustment'
 
-/** 특정 계좌+종목의 매매내역 기준 수량/취득원가 계산 (이동평균법). 보정 거래 제외 옵션 */
-function computeQtyCost(account: string, stockName: string, excludeAdjustment = false) {
-  const trades = data.trades
+function tradesOf(account: string, stockName: string, excludeAdjustment = false) {
+  return data.trades
     .filter(t => t.account === account && t.stock_name === stockName)
     .filter(t => !excludeAdjustment || t.source !== ADJUST_SOURCE)
     .sort((a, b) => a.trade_date.localeCompare(b.trade_date))
+}
+
+/** 특정 계좌+종목의 매매내역 기준 수량/취득원가 계산 (이동평균법). 보정 거래 제외 옵션 */
+function computeQtyCost(account: string, stockName: string, excludeAdjustment = false) {
+  const trades = tradesOf(account, stockName, excludeAdjustment)
 
   let qty = 0, cost = 0, avg = 0
   for (const t of trades) {
@@ -558,6 +562,49 @@ function computeQtyCost(account: string, stockName: string, excludeAdjustment = 
     }
   }
   return { qty, cost, avg, count: trades.length }
+}
+
+/**
+ * 단순 합산 수량 (매수합 - 매도합, clamp 없음).
+ *
+ * 다음 금융도 우리 앱처럼 보유수량이 0 아래로 내려가면 잘라낸다.
+ * 타사에서 이전받은 주식은 매수 기록이 없으므로 중간에 매도가 보유량을 초과하고,
+ * 그 시점에 수량이 소실되어 최종 보유수량이 실제보다 작아진다.
+ * 따라서 보정 수량은 clamp 된 값이 아니라 이 단순 합산 기준으로 계산해야 한다.
+ */
+function computeRawNet(account: string, stockName: string, excludeAdjustment = false) {
+  const trades = tradesOf(account, stockName, excludeAdjustment)
+  let buys = 0, sells = 0, running = 0, minRunning = 0
+  for (const t of trades) {
+    if (t.trade_type === 'BUY') { buys += t.quantity; running += t.quantity }
+    else { sells += t.quantity; running -= t.quantity }
+    if (running < minRunning) minRunning = running
+  }
+  // minRunning: 보정 없이 진행할 때 도달하는 최저 수량. 보정 수량이 이보다 크면 음수 구간이 없어진다.
+  return { net: buys - sells, buys, sells, minRunning, count: trades.length }
+}
+
+/**
+ * 보정 매수를 맨 앞에 특정 단가로 넣었을 때의 최종 취득원가를 계산합니다.
+ * 이동평균법에서 매도는 원가를 비례 차감하므로 최종 원가는 보정 단가에 대해 선형입니다.
+ * → 두 번만 계산하면 원하는 평단을 만드는 단가를 역산할 수 있습니다.
+ */
+function simulateCost(
+  trades: Trade[], openQty: number, openPrice: number
+): { qty: number; cost: number } {
+  let qty = openQty, cost = openQty * openPrice, avg = openQty > 0 ? openPrice : 0
+  for (const t of trades) {
+    if (t.trade_type === 'BUY') {
+      cost += t.quantity * t.price
+      qty += t.quantity
+      avg = qty > 0 ? cost / qty : 0
+    } else {
+      cost -= t.quantity * avg
+      qty -= t.quantity
+      if (qty <= 0) { qty = 0; cost = 0; avg = 0 }
+    }
+  }
+  return { qty, cost }
 }
 
 export interface ReconcileRow {
@@ -590,10 +637,12 @@ export function getReconciliation(): ReconcileRow[] {
 
     const holding = data.holdings.find(h => h.account_name === account && h.stock_name === stockName)
     const c = computeQtyCost(account, stockName)
+    const raw = computeRawNet(account, stockName)
     const holdingQty = holding?.quantity ?? 0
-    const diff = holdingQty - c.qty
-    if (diff === 0) continue
-    if (holdingQty === 0 && c.qty === 0) continue
+    // 다음 금융과 맞추려면 단순 합산 기준으로 차이를 봐야 한다
+    const diff = holdingQty - raw.net
+    if (diff === 0 && holdingQty === c.qty) continue
+    if (holdingQty === 0 && c.qty === 0 && raw.net <= 0) continue
 
     const hasAdjustment = data.trades.some(
       t => t.account === account && t.stock_name === stockName && t.source === ADJUST_SOURCE
@@ -608,7 +657,7 @@ export function getReconciliation(): ReconcileRow[] {
     rows.push({
       account, stock_name: stockName,
       stock_code: holding?.stock_code || '',
-      holdingQty, tradeQty: c.qty, diff,
+      holdingQty, tradeQty: raw.net, diff,
       holdingAvg: Math.round(holding?.avg_price ?? 0),
       tradeAvg: Math.round(c.avg),
       tradeCount: c.count,
@@ -640,47 +689,52 @@ export function applyReconciliation(
     )
     const removed = before - data.trades.length
 
-    // 2. 보정 제외 상태로 재계산
-    const c = computeQtyCost(account, stock_name, true)
+    // 2. 보정 제외 상태로 재계산 (단순 합산 기준 — 다음 금융과 같은 관점)
+    const raw = computeRawNet(account, stock_name, true)
     const holding = data.holdings.find(h => h.account_name === account && h.stock_name === stock_name)
     const targetQty = holding?.quantity ?? 0
-    const diff = targetQty - c.qty
+    const diff = targetQty - raw.net
 
     if (diff === 0) {
       logs.push(`${stock_name}: 차이 없음${removed > 0 ? ` (기존 보정 ${removed}건 제거)` : ''}`)
       continue
     }
 
-    // 3. 보정 거래 날짜: 반드시 기존 매매내역 "이후"여야 한다.
-    //    맨 앞에 넣으면 이후 매도 거래가 보정분을 소진해버려 최종 수량이 목표에 도달하지 않는다.
-    //    (매수 누락으로 이미 수량이 0으로 clamp 된 구간이 있기 때문)
-    //    마지막에 넣으면 최종 수량 = 기존 + 차이 가 되어 수량과 평단이 정확히 일치한다.
-    const lastDate = data.trades
-      .filter(t => t.account === account && t.stock_name === stock_name)
-      .reduce((max, t) => (t.trade_date > max ? t.trade_date : max), '')
-    const today = new Date().toISOString().slice(0, 10)
-    // 같은 날짜 내에서도 마지막으로 정렬되도록 시간을 붙임
-    const adjustDate = lastDate.slice(0, 10) > today
-      ? `${lastDate.slice(0, 10)} 23:59`
-      : `${today} 23:59`
+    // 3. 보정 거래 날짜: 기존 매매내역보다 "앞"이어야 한다.
+    //    이전받은 주식을 처음부터 보유한 것으로 만들어야 중간에 매도가 보유량을 초과하지 않는다.
+    //    뒤에 넣으면 중간 구간에서 수량이 0으로 잘려 다음 금융 보유수량이 실제보다 작아진다.
+    const remaining = tradesOf(account, stock_name, true)
+    const firstDate = remaining[0]?.trade_date
+      || tradesOf(account, '', true)[0]?.trade_date
+      || '2020-01-01'
+    const d0 = new Date(firstDate.slice(0, 10))
+    d0.setDate(d0.getDate() - 1)
+    const adjustDate = d0.toISOString().slice(0, 10)
 
     // 4. 단가 결정
     let price: number
     let note: string
     if (diff > 0) {
-      // 부족분 매수: 매매내역 평단이 잔고 평단과 같아지도록 역산
+      // 최종 평단이 잔고 평단과 같아지도록 역산.
+      // 최종 취득원가는 보정 단가에 대해 선형이므로 두 점을 계산해 역산한다.
       const targetCost = targetQty * (holding?.avg_price ?? 0)
-      const solved = (targetCost - c.cost) / diff
+      const c0 = simulateCost(remaining, diff, 0).cost
+      const c1 = simulateCost(remaining, diff, 1).cost
+      const slope = c1 - c0
+      const solved = slope !== 0 ? (targetCost - c0) / slope : 0
       if (solved > 0) {
         price = Math.round(solved)
         note = '이전 보유분 — 잔고 평단에 맞춘 역산 단가'
       } else {
-        // 역산이 음수면 잔고 평단 사용 (매매내역 취득원가가 잔고 취득원가보다 큰 경우)
         price = Math.round(holding?.avg_price ?? 0) || 1
         note = '이전 보유분 — 잔고 평단 (역산 불가)'
       }
+      if (raw.minRunning + diff < 0) {
+        note += ' / 주의: 보정 후에도 중간에 보유수량이 음수가 되는 구간이 있음'
+      }
     } else {
       // 과다분 매도: 평단으로 매도해 실현손익 영향을 최소화
+      const c = computeQtyCost(account, stock_name, true)
       price = Math.round(c.avg) || 1
       note = '이관/정리분 (평단 매도)'
     }
@@ -703,9 +757,13 @@ export function applyReconciliation(
     })
 
     applied++
+    const after = computeQtyCost(account, stock_name)
+    const afterRaw = computeRawNet(account, stock_name)
     logs.push(
-      `${stock_name}: ${diff > 0 ? '매수' : '매도'} ${Math.abs(diff)}주 @${price.toLocaleString()} 보정 ` +
-      `(매매 ${c.qty} → 잔고 ${targetQty})${removed > 0 ? ` / 기존 보정 ${removed}건 교체` : ''}`
+      `${stock_name}: ${diff > 0 ? '매수' : '매도'} ${Math.abs(diff)}주 @${price.toLocaleString()} (${adjustDate}) ` +
+      `→ 합산 ${afterRaw.net}주 / 평단 ${Math.round(after.avg).toLocaleString()} ` +
+      `(잔고 ${targetQty}주 / ${Math.round(holding?.avg_price ?? 0).toLocaleString()})` +
+      `${removed > 0 ? ` / 기존 보정 ${removed}건 교체` : ''}`
     )
   }
 
