@@ -139,23 +139,32 @@ export default function DaumSync() {
           const firstId = String(groupResult.groups[0]?.id || groupResult.groups[0]?.groupId || '1')
           setGroupId(firstId)
         }
-        // 그룹-계좌 자동 매핑 갱신
-        // 그룹 이름에 계좌번호 뒷자리(72480, 18160 등)가 포함된 경우 매핑 업데이트
+        // 그룹-계좌 자동 매핑 갱신 (그룹 이름에 계좌번호가 포함된 경우만 가능)
+        const validIds = new Set(groupResult.groups.map((g: any) => String(g.id || g.groupId)))
         const newMap: Record<string, string> = { ...accountGroupMap }
+        let changed = false
         for (const g of groupResult.groups) {
           const gid = String(g.id || g.groupId || '')
           const gname = String(g.name || g.groupName || '')
           for (const acctNum of Object.keys(newMap)) {
-            if (gname.includes(acctNum)) {
-              if (newMap[acctNum] !== gid) {
-                addLog(`📌 계좌 ${acctNum} 그룹 ID 업데이트: ${newMap[acctNum]} → ${gid}`)
-                newMap[acctNum] = gid
-              }
+            if (gname.includes(acctNum) && newMap[acctNum] !== gid) {
+              addLog(`📌 계좌 ${acctNum} 그룹 ID 자동 갱신: ${newMap[acctNum]} → ${gid}`)
+              newMap[acctNum] = gid
+              changed = true
             }
           }
         }
-        setAccountGroupMap(newMap)
-        await window.api.settings.set('daumAccountGroupMap', newMap)
+        if (changed) {
+          setAccountGroupMap(newMap)
+          await window.api.settings.set('daumAccountGroupMap', newMap)
+        }
+
+        // 저장된 매핑이 실제 그룹 목록에 없으면 경고 (그룹 삭제/재생성 시)
+        const stale = Object.entries(newMap).filter(([, gid]) => gid && !validIds.has(String(gid)))
+        if (stale.length > 0) {
+          addLog(`⚠️ 존재하지 않는 그룹에 연결된 계좌가 있습니다: ${stale.map(([a, g]) => `${a}→그룹${g}`).join(', ')}`)
+          addLog(`   "계좌 ↔ 다음 금융 그룹 연결" 에서 다시 선택해주세요.`)
+        }
       }
     } else {
       setCookieValid(false)
@@ -271,6 +280,22 @@ export default function DaumSync() {
       }
     }
     setCookieValid(true)
+
+    // 그룹 존재 여부 확인 — 삭제된 그룹에 POST 하면 다음 서버가 HTTP 500(HTML 에러 페이지)을 반환한다
+    const groupResult = await window.api.daum.getGroups(activeCookie)
+    if (groupResult.success && groupResult.groups.length > 0) {
+      setDaumGroups(groupResult.groups)
+      const exists = groupResult.groups.some((g: any) => String(g.id || g.groupId) === String(groupId))
+      if (!exists) {
+        const names = groupResult.groups
+          .map((g: any) => `${g.name || g.groupName || '그룹'}(ID: ${g.id || g.groupId})`)
+          .join(', ')
+        addLog(`❌ 그룹 ID ${groupId} 이(가) 존재하지 않습니다.`)
+        addLog(`   현재 그룹 목록: ${names}`)
+        addLog(`   위 "계좌 ↔ 다음 금융 그룹 연결" 에서 그룹을 다시 선택해주세요.`)
+        return
+      }
+    }
 
     setSyncing(true)
     const items: SyncItem[] = Object.entries(stockGroups)
@@ -417,6 +442,57 @@ export default function DaumSync() {
         <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 12, lineHeight: 1.6 }}>
           버튼을 누르면 카카오 로그인 창이 열립니다. 로그인하면 자동으로 쿠키가 추출됩니다.
         </div>
+
+        {/* 계좌 ↔ 다음 금융 그룹 매핑 */}
+        {cookieValid && (
+          <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--border)' }}>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>계좌 ↔ 다음 금융 그룹 연결</div>
+            {daumGroups.length === 0 ? (
+              <div style={{ fontSize: 12, color: 'var(--warning)' }}>
+                그룹 목록을 불러오지 못했습니다. 로그인을 다시 시도해주세요.
+              </div>
+            ) : (
+              <>
+                <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 8 }}>
+                  다음 금융에서 그룹을 삭제하고 새로 만들면 ID가 바뀝니다. 아래에서 다시 연결해주세요.
+                </div>
+                {syncableAccounts.map(acct => {
+                  const acctNum = acct.match(/\((\d+)\)/)?.[1] || ''
+                  const current = accountGroupMap[acctNum] || ''
+                  const missing = current && !daumGroups.some((g: any) => String(g.id || g.groupId) === String(current))
+                  return (
+                    <div key={acct} style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 }}>
+                      <span style={{ fontSize: 12, minWidth: 190 }}>{acct}</span>
+                      <select
+                        className="form-select"
+                        value={current}
+                        style={{ maxWidth: 240, fontSize: 12 }}
+                        onChange={async e => {
+                          const newMap = { ...accountGroupMap, [acctNum]: e.target.value }
+                          setAccountGroupMap(newMap)
+                          await window.api.settings.set('daumAccountGroupMap', newMap)
+                          addLog(`📌 ${acct} → 그룹 ${e.target.value} 로 연결 저장`)
+                        }}
+                      >
+                        <option value="">— 선택 —</option>
+                        {daumGroups.map((g: any) => {
+                          const id = String(g.id || g.groupId)
+                          const name = g.name || g.groupName || `그룹 ${id}`
+                          return <option key={id} value={id}>{name} (ID: {id})</option>
+                        })}
+                      </select>
+                      {missing && (
+                        <span style={{ fontSize: 11, color: 'var(--danger)' }}>
+                          저장된 그룹 {current} 이 존재하지 않습니다. 다시 선택해주세요.
+                        </span>
+                      )}
+                    </div>
+                  )
+                })}
+              </>
+            )}
+          </div>
+        )}
 
         {/* 고급 설정 (그룹 ID + 수동 쿠키) */}
         <div style={{ marginTop: 8 }}>
