@@ -16,7 +16,8 @@ import {
   getTransfers, addManyTransfers, deleteTransfers, updateTransfer, deleteTransferById,
   getDividends, addManyDividends, deleteDividends, updateDividend, deleteDividendById,
   isDatabaseReady, restoreFromCsvFiles, getAllData,
-  getDbPath, setDbPath
+  getDbPath, setDbPath,
+  getReconciliation, applyReconciliation, clearAdjustments
 } from './database'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -616,6 +617,20 @@ function registerIpcHandlers() {
     return getHoldingsSummary(rate)
   })
   ipcMain.handle('exchange:rate', () => fetchExchangeRate())
+
+  // === 잔고 대조 / 보정 ===
+  ipcMain.handle('reconcile:get', () => getReconciliation())
+  ipcMain.handle('reconcile:apply', (_e, targets) => {
+    const result = applyReconciliation(targets)
+    log.info(`[RECONCILE] 보정 ${result.applied}건 적용`)
+    for (const l of result.logs) log.info(`[RECONCILE]   ${l}`)
+    return result
+  })
+  ipcMain.handle('reconcile:clear', (_e, account?: string) => {
+    const removed = clearAdjustments(account)
+    log.info(`[RECONCILE] 보정 거래 ${removed}건 삭제 (${account || '전체'})`)
+    return removed
+  })
 
   // === 시세 업데이트 ===
   ipcMain.handle('holdings:refreshFromTrades', () => refreshHoldingsFromTrades())

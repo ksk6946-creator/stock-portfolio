@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from 'react'
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from 'recharts'
-import type { HoldingSnapshot, HoldingInput, HoldingsSummary, Trade } from '../types'
+import type { HoldingSnapshot, HoldingInput, HoldingsSummary, Trade, ReconcileRow } from '../types'
 import { formatKRW, formatPercent } from '../services/parser'
 
 const COLORS = ['#4263eb', '#e03131', '#2b8a3e', '#f08c00', '#7048e8', '#0ca678', '#e8590c', '#1098ad', '#d6336c', '#495057']
@@ -28,6 +28,69 @@ export default function AccountHoldings() {
 
   // 종목 상세 모달
   const [detailHolding, setDetailHolding] = useState<HoldingSnapshot | null>(null)
+
+  // 잔고 대조 / 보정
+  const [showReconcile, setShowReconcile] = useState(false)
+  const [reconcileRows, setReconcileRows] = useState<ReconcileRow[]>([])
+  const [reconcileSelected, setReconcileSelected] = useState<Set<string>>(new Set())
+  const [reconcileLogs, setReconcileLogs] = useState<string[]>([])
+  const [reconcileBusy, setReconcileBusy] = useState(false)
+
+  const rowKey = (r: { account: string; stock_name: string }) => `${r.account}::${r.stock_name}`
+
+  async function loadReconcile() {
+    setReconcileBusy(true)
+    try {
+      const rows = await window.api.reconcile.get()
+      setReconcileRows(rows)
+      // 기본 선택: 잔고가 더 많은 경우(이전/누락분)만. 매도 보정은 사용자가 직접 판단
+      setReconcileSelected(new Set(rows.filter(r => r.diff > 0).map(rowKey)))
+      setShowReconcile(true)
+      setReconcileLogs([])
+    } catch (err) {
+      setStatus('대조 실패: ' + String(err))
+    } finally {
+      setReconcileBusy(false)
+    }
+  }
+
+  async function applyReconcile() {
+    const targets = reconcileRows.filter(r => reconcileSelected.has(rowKey(r)))
+      .map(r => ({ account: r.account, stock_name: r.stock_name }))
+    if (targets.length === 0) { setStatus('보정할 항목을 선택해주세요.'); return }
+    if (!confirm(`${targets.length}개 종목에 보정 거래를 생성합니다.\n\n잔고(증권사 기준)는 변경되지 않고, 매매내역에만 "이전 보유분" 거래가 추가됩니다.\n재실행하면 기존 보정 거래를 교체합니다.\n\n계속하시겠습니까?`)) return
+
+    setReconcileBusy(true)
+    try {
+      const result = await window.api.reconcile.apply(targets)
+      setReconcileLogs(result.logs)
+      setStatus(`✅ 보정 ${result.applied}건 적용 완료`)
+      const rows = await window.api.reconcile.get()
+      setReconcileRows(rows)
+      setReconcileSelected(new Set(rows.filter(r => r.diff > 0).map(rowKey)))
+    } catch (err) {
+      setStatus('보정 실패: ' + String(err))
+    } finally {
+      setReconcileBusy(false)
+    }
+  }
+
+  async function clearAdjustments() {
+    if (!confirm('보정 거래를 모두 삭제합니다.\n원래 매매내역은 그대로 유지됩니다.\n\n계속하시겠습니까?')) return
+    setReconcileBusy(true)
+    try {
+      const removed = await window.api.reconcile.clear()
+      setStatus(`보정 거래 ${removed}건 삭제`)
+      const rows = await window.api.reconcile.get()
+      setReconcileRows(rows)
+      setReconcileSelected(new Set(rows.filter(r => r.diff > 0).map(rowKey)))
+      setReconcileLogs([])
+    } catch (err) {
+      setStatus('삭제 실패: ' + String(err))
+    } finally {
+      setReconcileBusy(false)
+    }
+  }
 
   // 종목 테이블 정렬
   const [sortKey, setSortKey] = useState<string>('eval_amount')
@@ -326,6 +389,9 @@ export default function AccountHoldings() {
             <button className="btn btn-outline" onClick={handleUpdatePrices} disabled={priceUpdating || holdings.length === 0}>
               {priceUpdating ? '⏳ 조회 중...' : '📈 시세 업데이트'}
             </button>
+            <button className="btn btn-outline" onClick={loadReconcile} disabled={reconcileBusy}>
+              {reconcileBusy ? '⏳ 대조 중...' : '🔍 잔고 대조'}
+            </button>
             <button className="btn btn-primary" onClick={() => setShowImport(true)}>📋 잔고 붙여넣기</button>
           </div>
         </div>
@@ -340,6 +406,96 @@ export default function AccountHoldings() {
           background: status.includes('실패') || status.includes('없습니다') ? 'rgba(224,49,49,0.1)' : 'rgba(43,138,62,0.1)',
           color: status.includes('실패') || status.includes('없습니다') ? 'var(--danger)' : 'var(--success)', fontSize: 14
         }}>{status}</div>
+      )}
+
+      {/* 잔고 대조 / 보정 */}
+      {showReconcile && (
+        <div className="card mb-16">
+          <div className="flex-between" style={{ marginBottom: 8 }}>
+            <h3 style={{ fontSize: 15 }}>🔍 잔고 대조 결과</h3>
+            <button className="btn btn-sm btn-outline" onClick={() => setShowReconcile(false)}>닫기</button>
+          </div>
+          <p style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 12, lineHeight: 1.6 }}>
+            잔고(증권사 기준)와 매매내역 계산 결과의 차이입니다. 타 증권사에서 이전한 주식, 누락된 해외 매매내역,
+            종목명 변경 등이 원인입니다.<br />
+            보정을 적용하면 <strong>매매내역에만</strong> 차이만큼의 거래가 추가되고 잔고는 그대로 유지됩니다.
+            다시 실행하면 기존 보정 거래를 교체하므로 중복이 쌓이지 않습니다.
+          </p>
+
+          {reconcileRows.length === 0 ? (
+            <div style={{ fontSize: 13, color: 'var(--success)' }}>✅ 잔고와 매매내역이 모두 일치합니다.</div>
+          ) : (
+            <>
+              <div style={{ display: 'flex', gap: 8, marginBottom: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+                  {reconcileRows.length}종목 불일치 / {reconcileSelected.size}개 선택
+                </span>
+                <button className="btn btn-sm btn-outline" onClick={() =>
+                  setReconcileSelected(new Set(reconcileRows.map(rowKey)))}>전체 선택</button>
+                <button className="btn btn-sm btn-outline" onClick={() =>
+                  setReconcileSelected(new Set(reconcileRows.filter(r => r.diff > 0).map(rowKey)))}>부족분만</button>
+                <button className="btn btn-sm btn-outline" onClick={() => setReconcileSelected(new Set())}>해제</button>
+                <button className="btn btn-sm btn-primary" onClick={applyReconcile} disabled={reconcileBusy}>
+                  ✏️ 선택 항목 보정
+                </button>
+                <button className="btn btn-sm btn-outline" onClick={clearAdjustments} disabled={reconcileBusy}
+                  style={{ marginLeft: 'auto' }}>🗑️ 보정 거래 전체 삭제</button>
+              </div>
+
+              <div style={{ overflowX: 'auto', maxHeight: 420 }}>
+                <table className="data-table" style={{ fontSize: 12 }}>
+                  <thead>
+                    <tr>
+                      <th style={{ width: 32 }}></th>
+                      <th>계좌</th>
+                      <th>종목명</th>
+                      <th style={{ textAlign: 'right' }}>잔고</th>
+                      <th style={{ textAlign: 'right' }}>매매계산</th>
+                      <th style={{ textAlign: 'right' }}>차이</th>
+                      <th style={{ textAlign: 'right' }}>잔고평단</th>
+                      <th>추정 원인</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {reconcileRows.map(r => {
+                      const k = rowKey(r)
+                      return (
+                        <tr key={k} style={{ background: r.hasAdjustment ? 'rgba(240,140,0,0.06)' : undefined }}>
+                          <td>
+                            <input type="checkbox" checked={reconcileSelected.has(k)}
+                              onChange={e => {
+                                const next = new Set(reconcileSelected)
+                                if (e.target.checked) next.add(k); else next.delete(k)
+                                setReconcileSelected(next)
+                              }} />
+                          </td>
+                          <td style={{ whiteSpace: 'nowrap' }}>{r.account}</td>
+                          <td>
+                            {r.stock_name}
+                            {r.hasAdjustment && <span style={{ fontSize: 10, color: 'var(--warning)', marginLeft: 4 }}>보정됨</span>}
+                          </td>
+                          <td style={{ textAlign: 'right' }}>{r.holdingQty.toLocaleString()}</td>
+                          <td style={{ textAlign: 'right' }}>{r.tradeQty.toLocaleString()}</td>
+                          <td style={{ textAlign: 'right', fontWeight: 600, color: r.diff > 0 ? 'var(--danger)' : 'var(--accent)' }}>
+                            {r.diff > 0 ? '+' : ''}{r.diff.toLocaleString()}
+                          </td>
+                          <td style={{ textAlign: 'right' }}>{r.holdingAvg.toLocaleString()}</td>
+                          <td style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{r.reason}</td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              {reconcileLogs.length > 0 && (
+                <div style={{ marginTop: 12, padding: 12, background: 'var(--bg-primary)', borderRadius: 6, fontSize: 11, fontFamily: 'monospace', maxHeight: 200, overflow: 'auto' }}>
+                  {reconcileLogs.map((l, i) => <div key={i}>{l}</div>)}
+                </div>
+              )}
+            </>
+          )}
+        </div>
       )}
 
       {/* 계좌 추가 */}

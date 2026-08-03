@@ -532,6 +532,199 @@ export function calculatePortfolio() {
   }
 }
 
+// === 잔고 대조 / 보정 ===
+// 잔고(holdings)는 증권사 CSV 스냅샷 기준이라 정답이고, 매매내역은 불완전할 수 있다.
+// (타 증권사에서 주식 이전, 해외 매매내역 누락, 종목명 변경 등)
+// 차이만큼 보정 거래를 만들어 매매내역 계산 결과가 잔고와 일치하도록 맞춘다.
+const ADJUST_SOURCE = 'adjustment'
+
+/** 특정 계좌+종목의 매매내역 기준 수량/취득원가 계산 (이동평균법). 보정 거래 제외 옵션 */
+function computeQtyCost(account: string, stockName: string, excludeAdjustment = false) {
+  const trades = data.trades
+    .filter(t => t.account === account && t.stock_name === stockName)
+    .filter(t => !excludeAdjustment || t.source !== ADJUST_SOURCE)
+    .sort((a, b) => a.trade_date.localeCompare(b.trade_date))
+
+  let qty = 0, cost = 0, avg = 0
+  for (const t of trades) {
+    if (t.trade_type === 'BUY') {
+      cost += t.quantity * t.price
+      qty += t.quantity
+      avg = qty > 0 ? cost / qty : 0
+    } else {
+      cost -= t.quantity * avg
+      qty -= t.quantity
+      if (qty <= 0) { qty = 0; cost = 0; avg = 0 }
+    }
+  }
+  return { qty, cost, avg, count: trades.length }
+}
+
+export interface ReconcileRow {
+  account: string
+  stock_name: string
+  stock_code: string
+  holdingQty: number      // 잔고 수량 (정답)
+  tradeQty: number        // 현재 매매내역 기준 수량 (보정 거래 포함)
+  diff: number            // 잔고 - 매매내역
+  holdingAvg: number
+  tradeAvg: number
+  tradeCount: number
+  hasAdjustment: boolean  // 기존 보정 거래 존재 여부
+  reason: string          // 추정 원인
+}
+
+/** 잔고와 매매내역의 차이를 조회합니다 (변경 없음) */
+export function getReconciliation(): ReconcileRow[] {
+  const rows: ReconcileRow[] = []
+
+  // 계좌+종목 후보 수집: 잔고에 있는 것 + 매매내역상 수량이 남은 것
+  const keys = new Set<string>()
+  for (const h of data.holdings) keys.add(`${h.account_name}::${h.stock_name}`)
+  for (const t of data.trades) keys.add(`${t.account}::${t.stock_name}`)
+
+  for (const key of keys) {
+    const sep = key.indexOf('::')
+    const account = key.slice(0, sep)
+    const stockName = key.slice(sep + 2)
+
+    const holding = data.holdings.find(h => h.account_name === account && h.stock_name === stockName)
+    const c = computeQtyCost(account, stockName)
+    const holdingQty = holding?.quantity ?? 0
+    const diff = holdingQty - c.qty
+    if (diff === 0) continue
+    if (holdingQty === 0 && c.qty === 0) continue
+
+    const hasAdjustment = data.trades.some(
+      t => t.account === account && t.stock_name === stockName && t.source === ADJUST_SOURCE
+    )
+
+    let reason: string
+    if (holdingQty > 0 && c.count === 0) reason = '매매내역 없음 (이전/누락)'
+    else if (diff > 0) reason = '잔고가 더 많음 (타사 이전분 등)'
+    else if (holdingQty === 0) reason = '잔고 없음 (종목명 변경/매도 누락 추정)'
+    else reason = '매매내역이 더 많음'
+
+    rows.push({
+      account, stock_name: stockName,
+      stock_code: holding?.stock_code || '',
+      holdingQty, tradeQty: c.qty, diff,
+      holdingAvg: Math.round(holding?.avg_price ?? 0),
+      tradeAvg: Math.round(c.avg),
+      tradeCount: c.count,
+      hasAdjustment, reason
+    })
+  }
+
+  return rows.sort((a, b) =>
+    a.account.localeCompare(b.account) || Math.abs(b.diff) - Math.abs(a.diff))
+}
+
+/**
+ * 선택한 계좌+종목에 보정 거래를 생성/갱신합니다.
+ * - 기존 보정 거래는 제거 후 다시 만들어 재실행해도 중복이 쌓이지 않습니다 (멱등)
+ * - 잔고(holdings)는 절대 변경하지 않습니다
+ * - 보정 매수 단가는 매매내역 평단이 잔고 평단과 일치하도록 역산합니다
+ */
+export function applyReconciliation(
+  targets: { account: string; stock_name: string }[]
+): { applied: number; logs: string[] } {
+  const logs: string[] = []
+  let applied = 0
+
+  for (const { account, stock_name } of targets) {
+    // 1. 기존 보정 거래 제거 (recalcHolding 을 호출하지 않도록 직접 필터링)
+    const before = data.trades.length
+    data.trades = data.trades.filter(
+      t => !(t.account === account && t.stock_name === stock_name && t.source === ADJUST_SOURCE)
+    )
+    const removed = before - data.trades.length
+
+    // 2. 보정 제외 상태로 재계산
+    const c = computeQtyCost(account, stock_name, true)
+    const holding = data.holdings.find(h => h.account_name === account && h.stock_name === stock_name)
+    const targetQty = holding?.quantity ?? 0
+    const diff = targetQty - c.qty
+
+    if (diff === 0) {
+      logs.push(`${stock_name}: 차이 없음${removed > 0 ? ` (기존 보정 ${removed}건 제거)` : ''}`)
+      continue
+    }
+
+    // 3. 보정 거래 날짜: 반드시 기존 매매내역 "이후"여야 한다.
+    //    맨 앞에 넣으면 이후 매도 거래가 보정분을 소진해버려 최종 수량이 목표에 도달하지 않는다.
+    //    (매수 누락으로 이미 수량이 0으로 clamp 된 구간이 있기 때문)
+    //    마지막에 넣으면 최종 수량 = 기존 + 차이 가 되어 수량과 평단이 정확히 일치한다.
+    const lastDate = data.trades
+      .filter(t => t.account === account && t.stock_name === stock_name)
+      .reduce((max, t) => (t.trade_date > max ? t.trade_date : max), '')
+    const today = new Date().toISOString().slice(0, 10)
+    // 같은 날짜 내에서도 마지막으로 정렬되도록 시간을 붙임
+    const adjustDate = lastDate.slice(0, 10) > today
+      ? `${lastDate.slice(0, 10)} 23:59`
+      : `${today} 23:59`
+
+    // 4. 단가 결정
+    let price: number
+    let note: string
+    if (diff > 0) {
+      // 부족분 매수: 매매내역 평단이 잔고 평단과 같아지도록 역산
+      const targetCost = targetQty * (holding?.avg_price ?? 0)
+      const solved = (targetCost - c.cost) / diff
+      if (solved > 0) {
+        price = Math.round(solved)
+        note = '이전 보유분 — 잔고 평단에 맞춘 역산 단가'
+      } else {
+        // 역산이 음수면 잔고 평단 사용 (매매내역 취득원가가 잔고 취득원가보다 큰 경우)
+        price = Math.round(holding?.avg_price ?? 0) || 1
+        note = '이전 보유분 — 잔고 평단 (역산 불가)'
+      }
+    } else {
+      // 과다분 매도: 평단으로 매도해 실현손익 영향을 최소화
+      price = Math.round(c.avg) || 1
+      note = '이관/정리분 (평단 매도)'
+    }
+
+    const id = data.nextTradeId++
+    data.trades.push({
+      id,
+      account,
+      stock_name,
+      trade_type: diff > 0 ? 'BUY' : 'SELL',
+      quantity: Math.abs(diff),
+      price,
+      total_amount: Math.abs(diff) * price,
+      fee: 0,
+      tax: 0,
+      trade_date: adjustDate,
+      source: ADJUST_SOURCE,
+      raw_message: `잔고 대조 보정 — ${note}`,
+      created_at: new Date().toISOString()
+    })
+
+    applied++
+    logs.push(
+      `${stock_name}: ${diff > 0 ? '매수' : '매도'} ${Math.abs(diff)}주 @${price.toLocaleString()} 보정 ` +
+      `(매매 ${c.qty} → 잔고 ${targetQty})${removed > 0 ? ` / 기존 보정 ${removed}건 교체` : ''}`
+    )
+  }
+
+  save()
+  return { applied, logs }
+}
+
+/** 보정 거래만 전체 삭제 (되돌리기) */
+export function clearAdjustments(account?: string): number {
+  const before = data.trades.length
+  data.trades = data.trades.filter(t => {
+    if (t.source !== ADJUST_SOURCE) return true
+    if (account && t.account !== account) return true
+    return false
+  })
+  save()
+  return before - data.trades.length
+}
+
 // === 전체 데이터 (백업용) ===
 export function getAllData(): DbData {
   return data

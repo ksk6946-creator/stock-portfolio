@@ -103,6 +103,11 @@ contextBridge.exposeInMainWorld('api', {
     getPath: () => ipcRenderer.invoke('db:getPath'),
     setPath: (newPath: string) => ipcRenderer.invoke('db:setPath', newPath),
   },
+  reconcile: {
+    get: () => ipcRenderer.invoke('reconcile:get'),
+    apply: (targets: { account: string; stock_name: string }[]) => ipcRenderer.invoke('reconcile:apply', targets),
+    clear: (account?: string) => ipcRenderer.invoke('reconcile:clear', account),
+  },
   updater: {
     // 업데이트 상태 구독. 반환된 함수를 호출하면 구독 해제
     onStatus: (callback: (status: any) => void) => {

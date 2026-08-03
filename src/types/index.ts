@@ -227,6 +227,21 @@ export interface ParsedKakaoItem {
   }
 }
 
+// 잔고 대조 결과
+export interface ReconcileRow {
+  account: string
+  stock_name: string
+  stock_code: string
+  holdingQty: number
+  tradeQty: number
+  diff: number
+  holdingAvg: number
+  tradeAvg: number
+  tradeCount: number
+  hasAdjustment: boolean
+  reason: string
+}
+
 // 자동 업데이트 상태
 export type UpdateStatus =
   | { type: 'idle' }
@@ -332,6 +347,11 @@ declare global {
         getAllData: () => Promise<{ trades: number; holdings: number; monthly: number; transfers: number; dividends: number; accounts: number }>
         getPath: () => Promise<string>
         setPath: (newPath: string) => Promise<{ success: boolean; error?: string }>
+      }
+      reconcile: {
+        get: () => Promise<ReconcileRow[]>
+        apply: (targets: { account: string; stock_name: string }[]) => Promise<{ applied: number; logs: string[] }>
+        clear: (account?: string) => Promise<number>
       }
       updater: {
         onStatus: (callback: (status: UpdateStatus) => void) => () => void
